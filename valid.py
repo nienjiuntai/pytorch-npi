@@ -7,10 +7,9 @@ from tqdm import tqdm
 import torch
 
 def valid_npi(questions:list, pretrained_encoder_weights:str, pretrained_npi_weights:str):
-    arg_num, arg_depth = config.arg_shape
     state_encoder = StateEncoder().to(config.device)
     state_encoder.load_state_dict(torch.load(pretrained_encoder_weights))
-    npi = NPI(state_encoder).to(config.device)
+    npi = NPI(state_encoder, max_depth=20, max_steps=10000).to(config.device)
     npi.load_state_dict(torch.load(pretrained_npi_weights))
     env = AdditionEnv()
     add_program:dict = {
@@ -21,7 +20,6 @@ def valid_npi(questions:list, pretrained_encoder_weights:str, pretrained_npi_wei
     correct:int = 0
     npi.eval().to(config.device)
     loop = tqdm(questions, postfix='correct: {correct} wrong: {wrong}')
-    loop
     for addend, augend in loop:
         npi.reset()
         with torch.no_grad():
@@ -34,9 +32,16 @@ def valid_npi(questions:list, pretrained_encoder_weights:str, pretrained_npi_wei
         else:
             correct +=1
         loop.set_postfix(correct=correct, wrong=wc)
+    return correct, wc
 
 if __name__ == '__main__':
-    max = 100000000
-    q = [[int(random() * max), int(random() * max)]  for _ in range(1000)]
-    valid_npi(q, f'{config.basedir}/weights/f_enc.weights', f'{config.basedir}/weights/npi.weights')
+    import os, sys
+    uuid = sys.argv[1]
+    assert(os.path.exists(f'{config.basedir}/outputs/{uuid}'))
+    for idx in range(1, 40):
+        max = 1e4 ** idx
+        q = [[int(random() * max), int(random() * max)]  for _ in range(100)]
+        cc, wc = valid_npi(q, f'{config.basedir}/weights/f_enc.weights', f'{config.basedir}/outputs/{uuid}/weights/npi.weights')
+        with open(f'{config.basedir}/outputs/{uuid}/accuracy.csv', 'a') as f:
+            f.write('{}, {}, {}\n'.format(idx * 4, cc, wc))
 

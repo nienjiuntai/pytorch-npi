@@ -1,7 +1,7 @@
 '''
 Configuration for NPI task addition
 '''
-import os
+import os, uuid
 import torch
 
 CONFIG = {
@@ -27,11 +27,19 @@ PROGRAMS = [
 
 class Cfg():
     basedir:str = os.path.realpath(os.path.dirname(__file__))
+    outdir:str = f'{basedir}/outputs/{uuid.uuid4()}'
     env_shape:tuple = (CONFIG['ENV_ROW'], CONFIG['ENV_COL'], CONFIG['ENV_DEPTH'])
     arg_shape:tuple = (CONFIG['ARG_NUM'], CONFIG['ARG_DEPTH'])
     prog_num:int = CONFIG['PROG_NUM']
     prog_key_size:int = CONFIG['PROG_KEY_SIZE']
     prog_embedding_size:int = CONFIG['PROG_EMBEDDING_SIZE']
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    def __init__(self):
+        if not os.path.exists(self.outdir):
+            os.makedirs(self.outdir)
+            os.makedirs(f'{self.outdir}/weights')
 
 config = Cfg()
+
+def output_param():
+    return vars(config)

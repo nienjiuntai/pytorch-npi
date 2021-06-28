@@ -1,14 +1,27 @@
+import os
 import torch.nn as nn
 from torch import optim, tensor
 from tqdm import tqdm
 from model.npi import NPI
 import torch.nn.functional as F
-from tasks.add.core import StateEncoder, program_embedding
+from tasks.add.core import StateEncoder
 from tasks.add.config import config
 from tasks.add.env import AdditionEnv
 import numpy as np
 import torch
-from random import random
+import random
+import matplotlib as mpl
+mpl.use('Agg')
+from matplotlib import pyplot as plt
+
+seed:int = 1016
+np.random.seed(seed)
+random.seed(seed)
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
 
 def npi_criteria(term_out:torch.Tensor, term:torch.Tensor, prog_out:torch.Tensor, prog:torch.Tensor, args_out:torch.Tensor, args, weights:list=[1] * 4):
     assert(len(weights) == 4)
@@ -22,6 +35,13 @@ def encoder_criteria(sum, sum_target, carry, carry_target):
     sum_loss = F.nll_loss(sum, sum_target.view(-1))
     carry_loss = F.nll_loss(carry, carry_target.view(-1))
     return sum_loss + carry_loss
+
+def init_weights(m):
+    if type(m) == nn.Linear:
+        torch.nn.init.kaiming_normal_(m.weight)
+        m.bias.data.fill_(0.01)
+    # else:
+    #     print(type(m))
 
 class EncodeTrainer(nn.Module):
     '''
@@ -39,17 +59,19 @@ class EncodeTrainer(nn.Module):
         sum = F.log_softmax(self.sum(z_state.clone()).view(1, -1), dim=1)
         carry = F.log_softmax(self.carry(z_state.clone()).view(1, -1), dim=1)
         return sum, carry
-        
+
 def train_f_enc(steplists, epochs:int=100, batch_size:int=1):
     env_row, env_col, env_depth = config.env_shape
     arg_num, arg_depth = config.arg_shape
     hidden_dim, state_dim = 100, 128
     trainer = EncodeTrainer(hidden_dim, state_dim, batch_size, env_depth).to(config.device)
-    optimizer = optim.Adam(trainer.parameters())
+    optimizer = optim.Adam(trainer.parameters())#, weight_decay=1e-6)
     for epoch in range(epochs):
         total_loss:list = []
-        for idx, steps in enumerate(steplists):
-            question, trace = steps['question'], steps['trace']
+        loop = tqdm(steplists, ncols=100)
+        loop.write('epoch: {}/{}'.format(epoch + 1, epochs))
+        for steps in loop:
+            trace = steps['trace']
             prev = None
             for step in trace:    # get batched step list
                 optimizer.zero_grad()
@@ -69,11 +91,13 @@ def train_f_enc(steplists, epochs:int=100, batch_size:int=1):
                 loss.backward()
                 optimizer.step()
                 total_loss.append(loss.item())
+            loop.set_postfix(loss=np.average(total_loss))
+            loop.update(1)
+        loop.close()
         avg_loss:float = np.average(total_loss)
-        print('epoch: {}, avg loss: {:2f}'.format(epoch + 1, avg_loss))
         if avg_loss < 1e-6:
             break
-    torch.save(trainer.encoder.state_dict(), f'{config.basedir}/weights/f_enc.weights')
+    torch.save(trainer.encoder.state_dict(), f'{config.outdir}/weights/f_enc.weights')
 
 def test_question(question:list, npi:NPI)->int:
     env = AdditionEnv()
@@ -82,8 +106,6 @@ def test_question(question:list, npi:NPI)->int:
         'pgid': 2,
         'args': []
     }
-    wc:int = 0
-    correct:int = 0
     npi.reset()
     with torch.no_grad():
         env.setup(addend, augend)
@@ -92,29 +114,44 @@ def test_question(question:list, npi:NPI)->int:
         # get environment observation
         return env.result
 
-def train(npi:NPI, optimizer, steplists:list, epochs:int=100, skip_correct:bool=False):
+def validate(npi:NPI, steplists:list, epochs:int=100):
+    _, arg_depth = config.arg_shape
+    env = AdditionEnv()
+    valid_loss:list = []
+    correct = wc = 0
+    npi.eval().to(config.device)
+    for step in steplists:
+        question, trace = step['question'], step['trace']
+        res = test_question(question, npi)
+        if res == np.sum(question):
+            correct += 1
+        else:
+            wc += 1
+        npi.reset()
+        with torch.no_grad():
+            for env, (pgid, args), (pgid_out, args_out), term_out in trace:
+                weights = [1] + [1 if 0 <= pgid < 6 else 1e-10] + [1e-10 if np.argmax(arg) == (arg_depth - 1) else 1 for arg in args_out]
+                # get environment observation
+                term_pred, pgid_pred, args_pred = npi(tensor(env).flatten().type(torch.FloatTensor).to(config.device), tensor(pgid).to(config.device), tensor(args).flatten().type(torch.FloatTensor).to(config.device))
+                total_loss = npi_criteria(term_pred, tensor(term_out).type(torch.FloatTensor).to(config.device), pgid_pred, tensor(pgid_out).to(config.device), args_pred, tensor(args_out).type(torch.FloatTensor).to(config.device), weights)
+                valid_loss.append(total_loss.item())
+    return np.average(valid_loss), correct / len(steplists)
+
+def train_with_plot(npi:NPI, optimizer, steplists:list, epochs:int=100, skip_correct:bool=False):
     arg_num, arg_depth = config.arg_shape
-    npi.train().to(config.device)
+    train_loss:list = []
+    valid_loss:list = []
+    # scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=1e-1, last_epoch=-1)
+    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=1e-1, patience=2)
     for epoch in range(epochs):
+        npi.train().to(config.device)
         # initialize corrent / wrong count
         losses:list = []
-        np.random.shuffle(steplists)
-        correct = wc = 0
-        loop = tqdm(steplists, postfix='loss: {loss} correct: {correct} wrong: {wrong}')
+        # np.random.shuffle(steplists)
+        loop = tqdm(steplists, ncols=100)
+        loop.write('epoch: {}/{}'.format(epoch + 1, epochs))
         for idx, step in enumerate(loop):
             question, trace = step['question'], step['trace']
-            res = test_question(question, npi)
-            if res == np.sum(question):
-                correct += 1
-            else:
-                wc += 1
-                if skip_correct:
-                    loop.set_description('epoch: {}'.format(epoch + 1))
-                    loop.set_postfix(loss=np.average(losses), correct=correct, worng=wc)
-                    continue
-            with open('log.txt', 'a') as f:
-                f.write('epoch: {:>3} idx: {:>3} {:>4} + {:>4} = {:>4}\n'.format(epoch + 1, idx, question[0], question[1], res))
-
             npi.reset()
             for env, (pgid, args), (pgid_out, args_out), term_out in trace:
                 optimizer.zero_grad()
@@ -125,35 +162,45 @@ def train(npi:NPI, optimizer, steplists:list, epochs:int=100, skip_correct:bool=
                 total_loss.backward()
                 optimizer.step()
                 losses.append(total_loss.item())
-            loop.set_description('epoch: {}'.format(epoch + 1))
-            # loop.set_description(epoch=epoch + 1)
-            loop.set_postfix(loss=np.average(losses), correct=correct, worng=wc)
-        with open('log.txt', 'a') as f:
-            f.write('-' * 20 + '\n')
+            # total_loss 
+            loop.set_postfix(loss=np.average(losses))
+        loop.close()
+        vloss, acc = validate(npi, steplists)
+        valid_loss.append(vloss)
+        train_loss.append(np.average(losses))
+        xlabel = np.array(range(len(train_loss))) + 1
+        plt.plot(xlabel, train_loss, 'b')
+        plt.plot(xlabel, valid_loss, 'g')
+        plt.ylabel('loss')
+        plt.xlabel('epochs')
+        plt.savefig(f'{config.outdir}/loss.png')
+        # scheduler.step()
         loop.close()
         npi.save()
-        if wc == 0:
+        if acc == 1.:
             return True
 
-def train_npi(steplists, epochs:int=100, batch_size:int=1, pretrained_encoder_weights:str=None):
+def train_npi(steplists, epochs:int=100, batch_size:int=1, pretrained_encoder_weights:str=f'{config.outdir}/weights/f_enc.weights'):
     state_encoder = StateEncoder().to(config.device)
     warm_up:list = list(filter(lambda question: 0 <= question['question'][0] < 100 and 0 <= question['question'][1] < 100, steplists)) 
-    if not pretrained_encoder_weights:
+    if not os.path.exists(pretrained_encoder_weights):
         print('start trainning f_enc model')
-        train_f_enc(warm_up)
-        pretrained_encoder_weights=f'{config.basedir}/weights/f_enc.weights'
-    state_encoder.load_state_dict(torch.load(pretrained_encoder_weights))
-    for param in state_encoder.parameters():
-        param.requires_grad = False
-        
+        train_f_enc(warm_up, epochs=epochs, batch_size=batch_size)
+    else:
+        state_encoder.load_state_dict(torch.load(pretrained_encoder_weights))
+    
+    state_encoder.trainable = False
+    
     npi = NPI(state_encoder).to(config.device)
-    optimizer = optim.Adam(npi.parameters(), lr=1e-4)
-
-    # warm up with single digit add
+    optimizer = optim.Adam(npi.parameters(), lr=1e-4, weight_decay=1e-6)
+    
+    # warm up with single digit addjj
     for _ in range(10):
-        if train(npi, optimizer, warm_up, epochs=100):
+        if train_with_plot(npi, optimizer, warm_up, epochs=100):
             break
-    train(npi, optimizer, steplists, epochs=100, skip_correct=False)
+    while True:
+        if train_with_plot(npi, optimizer, steplists, epochs=100, skip_correct=False):
+            break
     
 
 if __name__ == '__main__':
@@ -161,5 +208,5 @@ if __name__ == '__main__':
     with open(f'{config.basedir}/data/train.pik', 'rb') as data:
         steps = pickle.load(data)
     # train_npi(steps)
-    train_npi(steps, pretrained_encoder_weights=f'{config.basedir}/weights/f_enc.weights')
+    train_npi(steps, pretrained_encoder_weights=f'{config.outdir}/weights/f_enc.weights')
 

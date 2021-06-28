@@ -27,6 +27,7 @@ class StateEncoder(nn.Module):
         self.args_dim = self.arg_num * self.arg_depth # one hot encoding for argument * num of args
         self.prog_dim = self.prog_embedding_size    # program dimention for output categories
         self.method = method
+        self._trainable = True
         if self.method == 'linear':
             self.f_enc = nn.Sequential(
                 nn.Linear(self.env_dim + self.args_dim, self.hidden_dim),
@@ -49,6 +50,15 @@ class StateEncoder(nn.Module):
             x = self.layers(feature)
             output, _ = torch.max(x.view(self.nb_features, -1), dim=0)
             return output
+    
+    @property
+    def trainable(self):
+        return self._trainable
+    
+    @trainable.setter
+    def trainable(self, flag:bool):
+        for param in self.parameters():
+            param.requires_grad = flag
 
 # TODO: add embedding
 """

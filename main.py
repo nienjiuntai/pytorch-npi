@@ -1,7 +1,7 @@
 from tasks.add.config import config
-from tasks.add.env import env
+from tasks.add import env
 import argparse, pickle
-
+from trainer import train_npi
 def parse_args():
     parser = argparse.ArgumentParser(description='')
     parser.add_argument('type', type=str, help='train | test | valid | gen')
@@ -29,7 +29,9 @@ if __name__ == '__main__':
     if args.type == 'gen':
         create_dataset(args.size, args.prefix, config.basedir)
     elif args.type == 'train':
-        pass
+        with open(f'{config.basedir}/data/train.pik', 'rb') as data:
+            steps = pickle.load(data)
+        train_npi(steps, pretrained_encoder_weights=f'{config.basedir}/weights/f_enc.weights')
     elif args.type == 'test':
         pass
     elif args.type == 'valid':

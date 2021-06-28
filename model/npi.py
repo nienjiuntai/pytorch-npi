@@ -16,6 +16,7 @@ class NPITerm(nn.Module):
 
     def forward(self, x):
         x = self._fcn(x)
+        # x= F.dropout(x, training=self.training)
         x = torch.sigmoid(x)
         return x
 
@@ -28,6 +29,7 @@ class NPIProg(nn.Module):
     def forward(self, x):
         x = self._fcn1(x)
         x = self._fcn2(F.relu_(x))
+        # x= F.dropout(x, training=self.training)
         x = F.log_softmax(x.view(1, -1), dim=1)
         return x
 
@@ -38,6 +40,7 @@ class NPIArg(nn.Module):
         
     def forward(self, x):
         x = self.f_arg(x)
+        # x= F.dropout(x, training=self.training)
         x = F.log_softmax(x.view(1, -1), dim=1)
         return x
 
@@ -68,10 +71,10 @@ class NPICore(nn.Module):
         
 
 class NPI(nn.Module):
-    def __init__(self, state_encoder:StateEncoder, model_path:str=None):
+    def __init__(self, state_encoder:StateEncoder, model_path:str=None, max_depth:int=10, max_steps:int=1000):
         super(NPI, self).__init__()
         self.steps = 0
-        self.max_depth, self.max_steps = 10, 1000
+        self.max_depth, self.max_steps = max_depth, max_steps
 
         self.prog_dim, self.prog_key_size, self.prog_num = config.prog_embedding_size, config.prog_key_size, config.prog_num
         
@@ -98,13 +101,7 @@ class NPI(nn.Module):
         z_state = self.f_enc(torch.cat([state, args_embedding]))
         
         inpt = torch.cat([z_state, prog_embedding])
-        # out, (h_state, c_state) = self.f_lstm(inpt.view(1, 1, -1))  # find out how to use program embedding
-        # # h_state = F.relu(out)
-        # h_state = F.relu(h_state[-1])
         h_state = self.f_lstm(inpt.view(1, -1))  # find out how to use program embedding
-        # h_state = F.relu(out)
-        # h_state = h_state[-1]
-        # h_state = out
         t_state = self.f_term(h_state.clone())
         p_state = self.f_prog(h_state.clone())
         args_state:list = []
@@ -123,8 +120,8 @@ class NPI(nn.Module):
         args += [to_one_hot(self.arg_depth - 1, self.arg_depth) for _ in range(len(args) + 1, self.arg_num + 1)]   # fill with 10
         term, prog_key, args_out = self(tensor(env).flatten().type(torch.FloatTensor).to(config.device), tensor(pgid).to(config.device), tensor(args).flatten().type(torch.FloatTensor).to(config.device))
         return term.item(), torch.argmax(prog_key).item(), [torch.argmax(arg).item() for arg in args_out]
-
-    def step(self, env:AdditionEnv, pgid:int, args:list, term_thresh:float=0.5, depth:int=0):
+    # TODO:disable limit
+    def step(self, env:AdditionEnv, pgid:int, args:list, term_thresh:float=0.5, depth:int=0, display:bool=False):
         term_prob:float = 0
         if depth > self.max_depth:
             return
@@ -135,15 +132,18 @@ class NPI(nn.Module):
             env_state = env.get_observation()
             # term_prob, pgid_out, args_out = self(env_state, pgid, args)
             term_prob, pgid_pred, args_pred = self.predict(env_state, pgid, args)
-            # env.display_step(pgid, args, term_prob)
+            if display:
+                env.display_step(pgid, args, term_prob)
             if pgid in [0, 1]:
                 env.exec(pgid, args)
-                # env.display(pgid, args, term_prob)
+                if display:
+                    env.display(pgid, args, term_prob)
             else:
                 if pgid_pred != 6:    # here need modify
-                    self.step(env, pgid_pred, args_pred, depth=depth+1)
-    def save(self, modelpath:str=f'{config.basedir}/weights/npi.weights'):
+                    self.step(env, pgid_pred, args_pred, depth=depth+1, display=display)
+    def save(self, modelpath:str=f'{config.outdir}/weights/npi.weights'):
         torch.save(self.state_dict(), modelpath)
+
 def to_one_hot(x:int, dim:int, dtype=np.int8):
     one_hot = np.zeros((dim,), dtype=dtype)
     if 0 <= x < dim:
